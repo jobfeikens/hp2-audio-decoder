@@ -3,11 +3,18 @@ use std::fs::File;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::prelude::FileExt;
 
-const EA_XA_ADPCM_TABLE: [[i32; 2]; 4] = [[0, 0], [240, 0], [460, -208], [392, -220]];
+const SAMPLES_PER_FRAME: usize = 15;
+
+const EA_XA_ADPCM_TABLE: [[i16; 2]; 4] = [
+    [0, 0],
+    [240, 0],
+    [460, -208],
+    [392, -220]
+];
 
 struct Context {
-    sample_history_1: i32,
-    sample_history_2: i32,
+    sample_history_1: i16,
+    sample_history_2: i16,
 }
 
 impl Context {
@@ -20,8 +27,8 @@ impl Context {
 }
 
 struct FrameHeader {
-    coefficient_1: i32,
-    coefficient_2: i32,
+    coefficient_1: i16,
+    coefficient_2: i16,
     shift: u8,
 }
 
@@ -37,23 +44,29 @@ impl FrameHeader {
     }
 }
 
-fn decode_frame(context: &mut Context, frame: &[u8], output_buffer: &mut Vec<i16>) {
+fn decode_frame(context: &mut Context, frame: &[u8]) -> [i16; SAMPLES_PER_FRAME] {
     let header = FrameHeader::from_byte(frame[0]);
-    for byte in &frame[1..] {
-        let nibbles = [byte >> 4, byte & 0x0F];
-
+    let mut buffer = [0i16; SAMPLES_PER_FRAME];
+    for i in 1..SAMPLES_PER_FRAME {
+        let nibbles = [
+            (frame[i] >> 4),
+            (frame[i] & 0x0F)
+        ];
         for nibble in nibbles {
-            let sample = (((nibble as i32) << 28 >> header.shift)
-                + (header.coefficient_1 * context.sample_history_1)
-                + (header.coefficient_2 * context.sample_history_2))
-                >> 8;
-
-            output_buffer.push(sample as i16);
-
+            buffer[i] = decode_sample(context, nibble, &header);
             context.sample_history_2 = context.sample_history_1;
-            context.sample_history_1 = sample;
+            context.sample_history_1 = buffer[i];
         }
     }
+    buffer
+}
+
+fn decode_sample(context: &Context, nibble: u8, header: &FrameHeader) -> i16 {
+    let sample = (((nibble as i32) << 28 >> header.shift)
+        + (header.coefficient_1 * context.sample_history_1)
+        + (header.coefficient_2 * context.sample_history_2))
+        >> 8;
+    sample
 }
 
 fn main() -> anyhow::Result<()> {
