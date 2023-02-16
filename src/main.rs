@@ -1,9 +1,10 @@
-use std::fs;
-use std::fs::File;
-use std::io::{BufRead, Read, Write};
-use std::os::unix::prelude::FileExt;
+extern crate core;
 
-const SAMPLES_PER_FRAME: usize = 15;
+use std::{env, fs};
+use std::fs::File;
+use std::io::{Write};
+
+const FRAME_SIZE: usize = 15;
 
 const EA_XA_ADPCM_TABLE: [[i16; 2]; 4] = [
     [0, 0],
@@ -32,62 +33,54 @@ struct FrameHeader {
     shift: u8,
 }
 
-impl FrameHeader {
-    fn from_byte(byte: u8) -> Self {
-        let [coefficient_1, coefficient_2] = EA_XA_ADPCM_TABLE[(byte >> 4) as usize];
-
-        FrameHeader {
-            coefficient_1,
-            coefficient_2,
-            shift: (byte & 0x0F) + 8,
-        }
-    }
-}
-
-fn decode_frame(context: &mut Context, frame: &[u8]) -> [i16; SAMPLES_PER_FRAME] {
-    let header = FrameHeader::from_byte(frame[0]);
-    let mut buffer = [0i16; SAMPLES_PER_FRAME];
-    for i in 1..SAMPLES_PER_FRAME {
+fn decode_frame(context: &mut Context, frame: &[u8]) -> Vec<i16> {
+    let header = decode_frame_header(&frame);
+    let mut buffer = vec![];
+    for i in 1..FRAME_SIZE {
         let nibbles = [
             (frame[i] >> 4),
             (frame[i] & 0x0F)
         ];
         for nibble in nibbles {
-            buffer[i] = decode_sample(context, nibble, &header);
+            let sample = decode_sample(context, nibble, &header);
             context.sample_history_2 = context.sample_history_1;
-            context.sample_history_1 = buffer[i];
+            context.sample_history_1 = sample;
+            buffer.push(sample);
         }
     }
     buffer
 }
 
+fn decode_frame_header(frame: &[u8]) -> FrameHeader {
+    let header_byte = frame[0];
+    let coefficients = EA_XA_ADPCM_TABLE[(header_byte >> 4) as usize];
+    FrameHeader {
+        coefficient_1: coefficients[0],
+        coefficient_2: coefficients[1],
+        shift: (header_byte & 0x0F) + 8,
+    }
+}
+
 fn decode_sample(context: &Context, nibble: u8, header: &FrameHeader) -> i16 {
     let sample = (((nibble as i32) << 28 >> header.shift)
-        + (header.coefficient_1 * context.sample_history_1)
-        + (header.coefficient_2 * context.sample_history_2))
+        + (header.coefficient_1 as i32 * context.sample_history_1 as i32)
+        + (header.coefficient_2 as i32 * context.sample_history_2 as i32))
         >> 8;
-    sample
+    sample as i16
 }
 
 fn main() -> anyhow::Result<()> {
-    // https://stackoverflow.com/a/37033906
+    let args = env::args().collect::<Vec<String>>();
+    let input_path = args.get(1).expect("Enter input path");
+    let output_path = args.get(2).expect("Enter output path");
 
     let mut context = Context::new();
-    let file = File::open("sample.Sound")?;
-    let metadata = fs::metadata("sample.Sound")?;
+    let bytes = fs::read(input_path)?;
+
     let mut output_buffer = vec![];
 
-    for offset in (33..metadata.len() - 1500).step_by(15) {
-        println!("{}", offset);
-
-        if metadata.len() - offset < 15 {
-            break;
-        }
-
-        let mut frame = vec![0u8; 15];
-
-        file.read_at(&mut frame, offset)?;
-        decode_frame(&mut context, &frame, &mut output_buffer);
+    for frame in bytes.chunks(FRAME_SIZE) {
+        output_buffer.extend(decode_frame(&mut context, &frame));
     }
 
     let mut output_buffer_u8: Vec<u8> = vec![];
@@ -97,7 +90,7 @@ fn main() -> anyhow::Result<()> {
         output_buffer_u8.push((sample >> 8) as u8);
     }
 
-    let mut output_file = File::create("output.bin")?;
+    let mut output_file = File::create(output_path)?;
 
     output_file.write_all(&output_buffer_u8)?;
 
